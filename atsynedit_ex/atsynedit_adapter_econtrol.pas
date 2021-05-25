@@ -47,7 +47,6 @@ type
     TATAdapterProgressKind = (epkFirst, epkSecond, epkBoth);
   private
     EdList: TFPList;
-    Buffer: TATStringBuffer;
     FRangesColored: TATSortedRanges;
     FRangesColoredBounds: TATSortedRanges;
     FRangesSublexer: TATSortedRanges;
@@ -57,6 +56,7 @@ type
     FStopTreeUpdate: boolean;
     FTimeParseBegin: QWORD;
     FTimeParseElapsed: integer;
+    FBuffer: TATStringBuffer;
     FOnLexerChange: TATEditorEvent;
     FOnParseBegin: TNotifyEvent;
     FOnParseDone: TNotifyEvent;
@@ -83,7 +83,7 @@ type
     function GetTokenColorBG_FromMultiLineTokens(APos: TPoint;
       ADefColor: TColor; AEditorIndex: integer): TColor;
     function EditorRunningCommand: boolean;
-    procedure UpdateBuffer(ABuffer: TATStringBuffer);
+    function CreateBuffer: TATStringBuffer;
     procedure UpdatePublicDataNeedTo;
     procedure UpdateRanges;
     procedure UpdateRangesActive(AEdit: TATSynEdit);
@@ -536,7 +536,6 @@ begin
 
   EdList:= TFPList.Create;
   AnClient:= nil;
-  Buffer:= TATStringBuffer.Create;
   FRangesColored:= TATSortedRanges.Create;
   FRangesColoredBounds:= TATSortedRanges.Create;
   FRangesSublexer:= TATSortedRanges.Create;
@@ -554,8 +553,6 @@ begin
   FreeAndNil(FRangesSublexer);
   FreeAndNil(FRangesColoredBounds);
   FreeAndNil(FRangesColored);
-
-  FreeAndNil(Buffer);
   FreeAndNil(EdList);
 
   inherited;
@@ -585,9 +582,9 @@ end;
 function TATAdapterEControl.LexerAtPos(Pnt: TPoint): TecSyntAnalyzer;
 begin
   Result:= nil;
-  if AnClient<>nil then
+  if Assigned(AnClient) then
     Result:= AnClient.AnalyzerAtPos(
-               Buffer.CaretToStr(Pnt),
+               FBuffer.CaretToStr(Pnt),
                AnClient.PublicData.SublexRanges);
 end;
 
@@ -637,8 +634,10 @@ end;
 
 function TATAdapterEControl.GetTokenString(const token: PecSyntToken): string;
 begin
-  if Assigned(Buffer) then
-    Result:= Utf8Encode(Buffer.SubString(token^.Range.StartPos+1, token^.Range.EndPos-token^.Range.StartPos))
+  if Assigned(AnClient) then
+    Result:= Utf8Encode(FBuffer.SubString(
+              token^.Range.StartPos+1,
+              token^.Range.EndPos-token^.Range.StartPos))
   else
     Result:= '';
 end;
@@ -674,7 +673,6 @@ begin
   ATokenKind:= atkOther;
 
   if AnClient=nil then exit;
-  if Buffer=nil then exit;
 
   if (AIndex>=0) and (AIndex<AnClient.PublicData.Tokens.Count) then
     GetTokenProps(AnClient.PublicData.Tokens._GetItemPtr(AIndex), APntFrom, APntTo, ATokenString, ATokenStyle, ATokenKind);
@@ -694,7 +692,6 @@ begin
   ATokenKind:= atkOther;
 
   if AnClient=nil then exit;
-  if Buffer=nil then exit;
 
   n:= DoFindToken(APos);
   if n>=0 then
@@ -710,7 +707,6 @@ begin
   Result:= atkOther;
 
   if AnClient=nil then exit;
-  if Buffer=nil then exit;
 
   n:= DoFindToken(APos, true{AExactPos});
   if n<0 then exit;
@@ -935,7 +931,6 @@ begin
   ALexerName:= '';
 
   if AnClient=nil then exit;
-  if Buffer=nil then exit;
 
   Result:= (AIndex>=0) and (AIndex<SublexerRangeCount);
   if Result then
@@ -1059,16 +1054,17 @@ begin
 
   if Assigned(AAnalizer) then
   begin
-    UpdateBuffer(Buffer);
     UpdatePublicDataNeedTo;
 
-    AnClient:= TecClientSyntAnalyzer.Create(AAnalizer, Buffer);
+    AnClient:= TecClientSyntAnalyzer.Create(AAnalizer);
     if EdList.Count>0 then
       AnClient.FileName:= ExtractFileName(Editor.FileName);
     AnClient.OnParseDone:= @ParseDone;
     AnClient.OnProgressFirst:= @ProgressFirst;
     AnClient.OnProgressSecond:= @ProgressSecond;
     AnClient.OnProgressBoth:= @ProgressBoth;
+    FBuffer:= CreateBuffer;
+    AnClient.AddBuffer(FBuffer);
   end;
 
   if Assigned(FOnLexerChange) then
@@ -1085,20 +1081,25 @@ begin
   FRangesSublexer.UpdateOnChange(AChange, ALine, AItemCount);
 end;
 
-procedure TATAdapterEControl.UpdateBuffer(ABuffer: TATStringBuffer);
+function TATAdapterEControl.CreateBuffer: TATStringBuffer;
 var
   Ed: TATSynEdit;
   Lens: array of integer;
   Str: TATStrings;
   i: integer;
 begin
+  Result:= TATStringBuffer.Create;
   Ed:= Editor;
   if Ed=nil then exit;
   Str:= Ed.Strings;
   SetLength(Lens{%H-}, Str.Count);
   for i:= 0 to Length(Lens)-1 do
     Lens[i]:= Str.LinesLen[i];
-  ABuffer.Setup(Str.TextString_Unicode(Ed.OptMaxLineLenToTokenize), Lens);
+  Result.Setup(Str.TextString_Unicode(Ed.OptMaxLineLenToTokenize), Lens);
+
+  //debug
+  if Assigned(AnClient) then
+    Application.MainForm.Caption:= 'old buffers: '+IntToStr(AnClient.OldBufferList.Count);
 end;
 
 procedure TATAdapterEControl.UpdateRanges;
@@ -1196,6 +1197,7 @@ end;
 
 procedure TATAdapterEControl.UpdateRangesFoldAndColored;
 var
+  Buffer: TATStringBuffer;
   Ed: TATSynEdit;
   R: TecTextRange;
   Pnt1, Pnt2, Pnt1Wide, Pnt2Wide: TPoint;
@@ -1206,6 +1208,8 @@ var
   i: integer;
 begin
   if AnClient=nil then Exit;
+  Buffer:= FBuffer;
+  if Buffer=nil then Exit;
 
   //check folding enabled
   Ed:= Editor;
@@ -1365,9 +1369,9 @@ begin
   end
   else
   if AExactPos then
-    Result:= AnClient.PublicData.Tokens.FindAt(AnClient.Buffer.CaretToStr(APos))
+    Result:= AnClient.PublicData.Tokens.FindAt(FBuffer.CaretToStr(APos))
   else
-    Result:= AnClient.PublicData.Tokens.PriorAt(AnClient.Buffer.CaretToStr(APos));
+    Result:= AnClient.PublicData.Tokens.PriorAt(FBuffer.CaretToStr(APos));
 end;
 
 function TATAdapterEControl.GetLexer: TecSyntAnalyzer;
@@ -1381,8 +1385,9 @@ end;
 procedure TATAdapterEControl.DoChangeLog(Sender: TObject; ALine: integer);
 begin
   if AnClient=nil then Exit;
-  UpdateBuffer(Buffer);
   UpdatePublicDataNeedTo;
+  FBuffer:= CreateBuffer;
+  AnClient.AddBuffer(FBuffer);
   AnClient.TextChangedOnLine(ALine);
 end;
 
